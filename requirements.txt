@@ -1,0 +1,12 @@
+# General
+
+redis
+
+# Test
+unittest2
+nose
+nose-cover3
+mock
+
+coverage
+pylint
