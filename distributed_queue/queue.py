@@ -7,6 +7,7 @@ import traceback
 from distributed_queue import core, serializers, routers
 from .backends import BackendConnectionError
 
+logger = logging.getLogger("distributed_queue")
 
 class DistributedQueueError(Exception):
     """DistributedQueueError - base class for all errors in this queue
@@ -149,18 +150,18 @@ class DistributedQueue(object):
                     task, args, kwargs = received_data
                     try:
                         register.process(task, args, kwargs)
-                        logging.info("Task '%s' successfully finished" % task)
+                        logger.info("Task '%s' successfully finished" % task)
                     except NotRegisteredError:
-                        logging.warning("Received unexpected task '%s'" % task)
+                        logger.warning("Received unexpected task '%s'" % task)
                     except Exception as e:
-                        logging.exception(e)
+                        logger.exception(e)
                 else:
                     sleep(1)
             except KeyboardInterrupt:
-                logging.warning("Keyboard interrupted")
+                logger.warning("Keyboard interrupted")
                 break
             except Exception as e:
-                logging.exception(e)
+                logger.exception(e)
 
 
 class Register(object):
@@ -199,7 +200,7 @@ class Register(object):
         if task in self.registered_available_tasks:
             self._send(self.registered_available_tasks[task], *args, **kwargs)
         else:
-            logging.warning("Failed to send task '%s' - is not in registry", task)
+            logger.warning("Failed to send task '%s' - is not in registry", task)
 
     def register_available_task(self, func_name, task_settings=None):
         """Register available remote (or local) task to run it like
@@ -267,7 +268,7 @@ class Register(object):
                 if results is not None:
                     unique_id = kwargs.pop('unique_id', None)
                     if unique_id is None: 
-                        logging.warning("Received task '%s' without unqiue_id argument", task_name)
+                        logger.warning("Received task '%s' without unqiue_id argument", task_name)
                         return
                     register.send(task_name + '_' + self.HS_STARTED, unique_id=unique_id)
                 try:
@@ -276,7 +277,7 @@ class Register(object):
                         register.send(task_name + '_' + self.HS_FINISHED,
                             unique_id=unique_id, **result)
                 except Exception as exp:
-                    logging.exception("Error when calling task '%s'.", task_name)
+                    logger.exception("Error when calling task '%s'.", task_name)
                     if results is not None:
                         register.send(task_name + '_' + self.HS_ERROR,
                             unique_id=unique_id, exception=traceback.format_exc())
