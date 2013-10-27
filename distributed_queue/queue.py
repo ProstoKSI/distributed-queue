@@ -149,15 +149,18 @@ class DistributedQueue(object):
                     task, args, kwargs = received_data
                     try:
                         register.process(task, args, kwargs)
+                        logging.info("Task '%s' successfully finished" % task)
                     except NotRegisteredError:
                         logging.warning("Received unexpected task '%s'" % task)
+                    except Exception as e:
+                        logging.exception(e)
                 else:
                     sleep(1)
             except KeyboardInterrupt:
                 logging.warning("Keyboard interrupted")
                 break
-            except Exception:
-                logging.exception("Exception occured while processing received task.")
+            except Exception as e:
+                logging.exception(e)
 
 
 class Register(object):
