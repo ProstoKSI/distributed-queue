@@ -13,6 +13,8 @@ class BaseBackend(object):
         raise NotImplementedError()
 
     def receive(self, queue_name_list):
-        """Virtual method for getting element from queue"""
+        """Virtual method for getting element from queue.
+        Note: receive() should never lose a task!
+        """
         raise NotImplementedError()
 

@@ -85,7 +85,13 @@ class DistributedQueue(object):
 
     def send_custom(self, task, args, kwargs, backend_group=None, queue_name=None, retries=1):
         """Send task to distributed queue, with serializing to string
-        `.send('build_model', (arg1, arg2), {'kw1': 1, 'kw2': 2}, queue_name='custom_queue', retries=0)`
+        `.send_custom(
+            'build_model',
+            (arg1, arg2),
+            {'kw1': 1, 'kw2': 2},
+            queue_name='custom_queue',
+            retries=0
+        )`
 
         If `retries` is 0 than retry until success.
         """
@@ -111,7 +117,7 @@ class DistributedQueue(object):
 
     def send(self, task, *args, **kwargs):
         """Send task shortcut for more pythonic execution style.
-        `.p('build_model', arg1, arg2, kw1=1, kw2=2)`
+        `.send('build_model', arg1, arg2, kw1=1, kw2=2)`
         """
         self.send_custom(task, args, kwargs)
 
