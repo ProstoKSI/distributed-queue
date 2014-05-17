@@ -7,7 +7,57 @@ import traceback
 from distributed_queue import core, serializers, routers
 from .backends import BackendConnectionError
 
-logger = logging.getLogger("distributed_queue")
+logger = logging.getLogger('distributed_queue')
+
+# TODO: move it to utils or even pymisc
+import Queue
+import threading
+class StoppableThread(threading.Thread):
+    """This is thread can be stopped.
+    
+    Note: Thread by default does not return function result in any case,
+    which is why I've implemented this workaroung with built-in Queue.
+    """
+    def __init__(self, **kwargs):
+        super(StoppableThread, self).__init__(**kwargs)
+        self.__target = kwargs.get('target')
+        self.__args = kwargs.get('args')
+        if self.__args is None:
+            self.__args = ()
+        self.__kwargs = kwargs.get('kwargs')
+        if self.__kwargs is None:
+            self.__kwargs = {}
+        self.__result_queue = Queue.Queue()
+        self.__stopped = threading.Event()
+
+    def stop(self):
+        self.__stopped.set()
+
+    def is_stopped(self):
+        return self.__stopped.is_set()
+
+    def run(self):
+        try:
+            self.__kwargs['_is_stopped'] = self.__stopped.is_set
+            try:
+                if self.__target:
+                    func_result = self.__target(*self.__args, **self.__kwargs)
+            finally:
+                # Avoid a refcycle if the thread is running a function with
+                # an argument that has a member that points to the thread.
+                del self.__target, self.__args, self.__kwargs
+        except Exception:
+            self.__result_queue.put(traceback.format_exc())
+        else:
+            self.__result_queue.put(func_result)
+
+    def get_result(self):
+        self.join()
+        try:
+            return self.__result_queue.get_nowait()
+        except Queue.Empty:
+            return None
+
 
 class DistributedQueueError(Exception):
     """DistributedQueueError - base class for all errors in this queue
@@ -25,6 +75,9 @@ class NotRegisteredError(Exception):
     """Exception that is used to indicate, that requested task is not registered yet.
     """
     pass
+
+
+DEFAULT_BACKEND_SETTINGS_GROUP = 'default'
 
 
 class DistributedQueue(object):
@@ -51,39 +104,40 @@ class DistributedQueue(object):
         """
         register.attach_task_queue(self)
         self.backends = {}
-        for settings_group, backend_settings in queue_settings.items():
-            if 'backend' not in backend_settings:
+        for settings_group, backend_preferences in queue_settings.iteritems():
+            if 'backend' not in backend_preferences:
                 raise DistributedQueueError("`backend` is required option for backend settings")
-            if 'queues' not in backend_settings:
+            if 'queues' not in backend_preferences:
                 raise DistributedQueueError("`queues` is required option for backend settings")
 
-            router = backend_settings.pop('router', None)
+            router = backend_preferences.pop('router', None)
             if router is None:
-                if 'default_queue' not in backend_settings:
+                if 'default_queue' not in backend_preferences:
                     raise DistributedQueueError("`queues` is required option for backend settings")
-                if backend_settings['default_queue'] not in backend_settings['queues']:
+                if backend_preferences['default_queue'] not in backend_preferences['queues']:
                     raise DistributedQueueError("`default_queue` should be listed in `queues`")
+                router = routers.DefaultRouter(backend_preferences.pop('default_queue'))
                 
-            backend_group = {
-                'serializer': backend_settings.pop('serializer', serializers.JsonSerializer()),
-                'router': router if router is not None else 
-                    routers.DefaultRouter(backend_settings.pop('default_queue')),
-                'queues': backend_settings.pop('queues'),
+            backend_settings = {
+                'serializer': backend_preferences.pop('serializer', serializers.JsonSerializer()),
+                'router': router,
+                'queues': backend_preferences.pop('queues'),
             }
-            backend = backend_settings.pop('backend')
+            backend = backend_preferences.pop('backend')
             if isinstance(backend, str):
                 if backend in core.BACKEND_LIST:
-                    backend = core.create_backend(backend, **backend_settings)
+                    backend = core.create_backend(backend, **backend_preferences)
                 else:
                     raise DistributedQueueError("Unknown backend name `%s`. Expected: %s"\
                         % (backend, ','.join(core.BACKEND_LIST)))
             elif not (hasattr(backend, 'send') and hasattr(backend, 'receive')):
                 raise DistributedQueueError("Backend is incompatible: " +\
                     "should have send and receive methods.")
-            backend_group['backend'] = backend
-            self.backends[settings_group] = backend_group
+            backend_settings['backend'] = backend
+            self.backends[settings_group] = backend_settings
 
-    def send_custom(self, task, args, kwargs, backend_group=None, queue_name=None, retries=1):
+    def send_custom(self, task, args, kwargs, backend_settings_group=None,
+            queue_name=None, retries=1):
         """Send task to distributed queue, with serializing to string
         `.send_custom(
             'build_model',
@@ -95,45 +149,48 @@ class DistributedQueue(object):
 
         If `retries` is 0 than retry until success.
         """
-        if backend_group is None:
-            backend_group = 'default'
-        backend_group_info = self.backends[backend_group]
+        # Don't move this to default argument value as we want to accept None
+        # as an indicator to use DEFAULT value.
+        if backend_settings_group is None:
+            backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
+        backend_settings = self.backends[backend_settings_group]
         if queue_name is None:
-            queue_name = backend_group_info['router'].get_queue_name(self.backends, task, args, kwargs)
-        if retries <= 0:
-            retries = -1
-        item = backend_group_info['serializer'].dumps((task, args, kwargs))
+            queue_name = backend_settings['router'].get_queue_name(self.backends, task, args, kwargs)
+        item = backend_settings['serializer'].dumps((task, args, kwargs))
         while 1:
             try:
-                backend_group_info['backend'].send(queue_name, item)
+                backend_settings['backend'].send(queue_name, item)
             except BackendConnectionError:
-                if retries != -1:
+                if retries > 0:
                     retries -= 1
-                    if retries < 0:
+                    if retries <= 0:
                         raise
                     sleep(1)
             else:
                 break
 
     def send(self, task, *args, **kwargs):
-        """Send task shortcut for more pythonic execution style.
+        """Send task shortcut for pythonic execution style.
         `.send('build_model', arg1, arg2, kw1=1, kw2=2)`
         """
         self.send_custom(task, args, kwargs)
 
-    def receive(self, backend_group=None, queue_name=None, timeout=0):
+    def receive(self, backend_settings_group=None, queue_name=None, timeout=0):
         """Receive task from distributed queue, with deserializing from string
         
         If timeout is 0, then block indefinitely.
         """
-        if backend_group is None:
-            backend_group = 'default'
-        backend_group = self.backends[backend_group]
-        queue_name_list = [queue_name] if queue_name is not None else backend_group['queues']
-        item = None
+        # Don't move this to default argument value as we want to accept None
+        # as an indicator to use DEFAULT value.
+        if backend_settings_group is None:
+            backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
+        backend_settings = self.backends[backend_settings_group]
+        queue_name_list = [queue_name] if queue_name is not None else backend_settings['queues']
+        task_id = None
         while 1:
             try:
-                item = backend_group['backend'].receive(queue_name_list, timeout=timeout)
+                task_id, serialized_task = backend_settings['backend']\
+                    .receive(queue_name_list, timeout=timeout)
             except BackendConnectionError:
                 if timeout != 0:
                     timeout -= 1
@@ -142,29 +199,82 @@ class DistributedQueue(object):
                     sleep(1)
             else:
                 break
-        if item is None: 
+        if task_id is None: 
             return None
-        return backend_group['serializer'].loads(item)
+        return task_id, backend_settings['serializer'].loads(serialized_task)
 
-    def process(self):
+    def keep_alive(self, task_id, backend_settings_group=None, queue_name=None):
+        """Send keep-alive message and return False if the task has been canceled.
+        """
+        # Don't move this to default argument value as we want to accept None
+        # as an indicator to use DEFAULT value.
+        if backend_settings_group is None:
+            backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
+        backend_settings = self.backends[backend_settings_group]
+        try:
+            return backend_settings['backend'].keep_alive(task_id, queue_name=queue_name)
+        except BackendConnectionError:
+            pass
+        # Assume that task is still marked alive if backend is unreachable
+        # It's naive, but what can we do?
+        return True
+
+    def acknowledge(self, task_id, backend_settings_group=None,
+            queue_name=None, retries=5):
+        """Acknowledge task means that it was done and we want to mark it as
+        done on the backend queue.
+        """
+        # Don't move this to default argument value as we want to accept None
+        # as an indicator to use DEFAULT value.
+        if backend_settings_group is None:
+            backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
+        backend_settings = self.backends[backend_settings_group]
+        for retries_left in xrange(retries, 0, -1):
+            try:
+                backend_settings['backend'].acknowledge(task_id, queue_name=queue_name)
+            except BackendConnectionError:
+                pass
+            else:
+                break
+
+    def reject(self, task_id, backend_settings_group=None, queue_name=None):
+        """Reject task means that we want to ignore/delete the task.
+        """
+        # Don't move this to default argument value as we want to accept None
+        # as an indicator to use DEFAULT value.
+        if backend_settings_group is None:
+            backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
+        backend_settings = self.backends[backend_settings_group]
+        try:
+            backend_settings['backend'].reject(task_id, queue_name=queue_name)
+        except BackendConnectionError:
+            pass
+
+    def process(self, backend_settings_group=None):
         """Infinity task processing loop.
         """
+        # Don't move this to default argument value as we want to accept None
+        # as an indicator to use DEFAULT value.
+        if backend_settings_group is None:
+            backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
         while 1:
             try:
-                received_data = self.receive()
+                received_data = self.receive(backend_settings_group=backend_settings_group)
                 if received_data is not None:
-                    task, args, kwargs = received_data
+                    task_id, (task, args, kwargs) = received_data
                     try:
-                        register.process(task, args, kwargs)
-                        logger.info("Task '%s' successfully finished" % task)
+                        register.process(task_id, task, args, kwargs)
                     except NotRegisteredError:
+                        self.reject(task_id, backend_settings_group=backend_settings_group)
                         logger.warning("Received unexpected task '%s'" % task)
                     except Exception as e:
                         logger.exception(e)
+                    else:
+                        logger.info("Task '%s' is finished" % task)
                 else:
                     sleep(1)
             except KeyboardInterrupt:
-                logger.warning("Keyboard interrupted")
+                logger.info("Keyboard interrupted")
                 break
             except Exception as e:
                 logger.exception(e)
@@ -174,137 +284,230 @@ class Register(object):
     """Register class for storing task names with task processor functions.
     """
 
-    HS_STARTED = 'started'
-    HS_FINISHED = 'finished'
-    HS_ERROR = 'error'
-    HANDLER_STATUS_LIST = [HS_STARTED, HS_FINISHED, HS_ERROR]
+    CT_STARTED = 'started'
+    CT_FINISHED = 'finished'
+    CT_ERROR = 'error'
+    CALLBACK_TYPE_LIST = [CT_STARTED, CT_FINISHED, CT_ERROR]
     
     registered_task_processors = {}
     registered_available_tasks = {}
     task_queue = None
+
+    def __init__(self):
+        def register_callback_type_decorator(callback_type):
+            self.__dict__['task_%s_callback' % callback_type] = lambda *args, **kwargs: \
+                self._task_CALLBACK_TYPE_callback(callback_type, *args, **kwargs)
+
+        for callback_type in self.CALLBACK_TYPE_LIST:
+            register_callback_type_decorator(callback_type)
     
     def attach_task_queue(self, task_queue):
-        """Attach 'task_queue' to registry as queue to use for sending outgoing tasks"""
+        """Attach 'task_queue' to registry as queue to use for sending outgoing tasks
+        """
         self.task_queue = task_queue
 
-    def register(self, name, func):
+    def register(self, task_uid, func):
         """Register local task processor.
         """
-        if name in self.registered_task_processors:
-            raise RegisterError("Task processor with name '%s' is already registered" % name)
-        self.registered_task_processors[name] = func
-        self.register_available_task(name)
+        if task_uid in self.registered_task_processors:
+            raise RegisterError("Task processor with task_uid '%s' is already "
+                "registered" % task_uid)
+        if task_uid not in self.registered_available_tasks:
+            raise RegisterError("Task processor with task_uid '%s' is not in "
+                "available tasks. Register available tasks before registering "
+                "processors.")
+        self.registered_task_processors[task_uid] = func
+        logger.info("Task processor for task '%s' is registered." % task_uid)
 
     def _send(self, task_settings, *args, **kwargs):
-        """Send task to specified queue via specified backend"""
-        self.task_queue.send_custom(task_settings['task'], args, kwargs,
-            backend_group=task_settings.get('backend_group'),
-            queue_name=task_settings.get('queue_name'))
+        """Send task to specified queue via specified backend
+        """
+        self.task_queue.send_custom(task_settings['task_uid'], args, kwargs,
+            backend_settings_group=task_settings.get('backend_settings'),
+            queue_name=task_settings.get('static_route_queue'))
 
-    def send(self, task, *args, **kwargs):
-        """Send task based on registry"""
-        if task in self.registered_available_tasks:
-            self._send(self.registered_available_tasks[task], *args, **kwargs)
+    def send(self, task_uid, *args, **kwargs):
+        """Send task based on registry
+        """
+        if task_uid in self.registered_available_tasks:
+            self._send(self.registered_available_tasks[task_uid], *args, **kwargs)
         else:
-            logger.warning("Failed to send task '%s' - is not in registry", task)
+            logger.error("The task '%s' is not registered", task_uid)
+
+    def _keep_alive(self, task_settings, task_id):
+        """Send keep-alive message and return True if task has been canceled
+        """
+        return self.task_queue.keep_alive(task_id,
+            backend_settings_group=task_settings.get('backend_settings'),
+            queue_name=task_settings.get('static_route_queue'))
+
+    def _acknowledge(self, task_settings, task_id):
+        """Send keep-alive message and return True if task has been canceled
+        """
+        return self.task_queue.acknowledge(task_id,
+            backend_settings_group=task_settings.get('backend_settings'),
+            queue_name=task_settings.get('static_route_queue'))
 
     def register_available_task(self, func_name, task_settings=None):
         """Register available remote (or local) task to run it like
         `register.send_build_model(arg1, arg2)`
         """
         if task_settings is None:
-            task_settings = {'task': func_name}
-        elif 'task' not in task_settings:
-            task_settings['task'] = func_name
-        self.registered_available_tasks[func_name] = task_settings
-        self.__dict__['send_' + func_name] = lambda *args, **kwargs: \
-            self._send(task_settings, *args, **kwargs)
+            task_settings = {'task_uid': func_name}
+        elif 'task_uid' not in task_settings:
+            task_settings['task_uid'] = func_name
+        task_uid = task_settings['task_uid']
+        if task_uid in self.registered_available_tasks:
+            raise RegisterError("Task with task_uid '%s' is already registered" % task_uid)
+        self.registered_available_tasks[task_uid] = task_settings
+        if func_name is not None:
+            self.__dict__['send_' + func_name] = lambda *args, **kwargs: \
+                self._send(task_settings, *args, **kwargs)
+        logger.info("Task %s is available now." \
+            % ("'%s' (%s)" % (task_uid, func_name) if func_name else "'%s'" % task_uid))
+        if 'callbacks_queue_settings' in task_settings:
+            for callback_type in self.CALLBACK_TYPE_LIST:
+                try:
+                    self.register_available_task(None, task_settings={
+                        'task_uid': '%s:%s' % (task_uid, callback_type),
+                        'backend_settings': task_settings['callbacks_queue_settings'],
+                    })
+                except RegisterError:
+                    logger.debug("Callback '%s' couldn't be registered for "
+                        "task uid '%s'. Exception:\n%s" \
+                            % (callback_type, task_uid, traceback.format_exc()))
 
     def register_available_tasks(self, available_tasks):
-        """Register available remote tasks, that we have only 'headers'.
+        """Register available remote tasks. We need only task id to get
+        started, although you can specify backend settings group and
+        queue_name.
+
         For example:
 
-        T_UPLOAD_DATASOURCE = 'process_upload_datasource'
-        T_TRANSFORM_DATASET = 'make_dataset'
         T_BUILD_MODEL = 'build_model'
+        register.register_available_tasks([T_BUILD_MODEL])
+
+        T_PROCESS_NEW_DATASOURCE = 1
+        T_TRANSFORM_DATASET = 2
         available_tasks = {
-            T_UPLOAD_DATASOURCE: {
-                'task': 'upload_datasource', # you can specify custom task name
-                                             # for 'function name', see example bellow
+            'process_new_datasource': {
+                # you can specify custom task id, i.e. number constant
+                'task_uid': T_PROCESS_NEW_DATASOURCE,
             }
-            T_TRANSFORM_DATASET: {
-                'task': 'transform_dataset',
-                'backend_group': 'default',
-                'queue_name': 'hadoop_workers', # even you can specify queue_name, to avoid routing
+            'make_dataset': {
+                'task_uid': T_TRANSFORM_DATASET,
+                'backend_settings': 'default',
+                'callbacks_queue_settings': 'hadoop_results',
+
+                # you can even specify the queue_name to apply static routing
+                'static_route_queue': 'hadoop_workers',
             }
         }
         register.register_available_tasks(available_tasks)
-        register.register_available_tasks([T_BUILD_MODEL])
 
         ...
 
-        register.send(T_UPLOAD_DATASOURCE, link)
+        register.send(T_PROCESS_NEW_DATASOURCE, link)
         register.send_make_dataset(link)
         register.send_build_model(settings)
         """
         if isinstance(available_tasks, list):
-            available_tasks = {name: {'task': name} for name in available_tasks}
+            available_tasks = {name: {'task_uid': name} for name in available_tasks}
         for func_name, task_settings in available_tasks.iteritems():
             self.register_available_task(func_name, task_settings)
 
-    def process(self, task, args, kwargs):
+    def process(self, task_id, task, args, kwargs):
         """Process received task.
         """
         if task not in self.registered_task_processors:
             raise NotRegisteredError
+        kwargs['dq_task_settings'] = self.registered_available_tasks[task]
+        kwargs['dq_task_id'] = task_id
+        if 'unqiue_id' not in kwargs:
+            kwargs['unique_id'] = task_id
         self.registered_task_processors[task](*args, **kwargs)
 
-    def task(self, results=None, name=None):
-        """Task decorator, that allows direct function execution while it's
-        already register the task. If `name` not passed - function's name will be used
-        `results` specifies queue or (backend, queue) to send started/finished/error tasks to
+    def task(self, task_uid=None, ignore_result=False):
+        """This is a decorator, which registers a decorated function as a task.
+        It will not change the function behaviour if it executes directly.
+
+        `results` argument specifies `queue name` or tuple of
+        (`backend settings group`, `queue name`) where to send
+        started/finished/error callbacks.
+
+        `task_uid` is a unique task function identifier, which is synced
+        between master and workers. It's suggested to use integers, but you can
+        use strings as well.
         """
+        if isinstance(task_uid, int):
+            _task_str_uid = unicode(task_uid)
+        else:
+            _task_str_uid = task_uid
+        task_started = _task_str_uid + ':' + self.CT_STARTED
+        task_finished = _task_str_uid + ':' + self.CT_FINISHED
+        task_error = _task_str_uid + ':' + self.CT_ERROR
+
         def wrapper(func):
-            """Wrapper, that register task."""
-            task_name = func.__name__ if name is None else name
+            """Wrapper that registers the task.
+            """
             def wrapped_func(*args, **kwargs):
                 """Wrapped function that will be called by register 
-                when appropriate task is received
+                when an appropriate task is received
                 """
-                if results is not None:
+                task_settings = kwargs.pop('dq_task_settings')
+                task_id = kwargs.pop('dq_task_id')
+                if not ignore_result:
                     unique_id = kwargs.pop('unique_id', None)
-                    if unique_id is None: 
-                        logger.warning("Received task '%s' without unqiue_id argument", task_name)
-                        return
-                    register.send(task_name + '_' + self.HS_STARTED, unique_id=unique_id)
+                    register.send(task_started, unique_id=unique_id)
                 try:
-                    result = func(*args, **kwargs)
-                    if results is not None:
-                        register.send(task_name + '_' + self.HS_FINISHED,
-                            unique_id=unique_id, **result)
+                    # Run user's function asyncronously, use thread to do that.
+                    func_async = StoppableThread(target=func, args=args, kwargs=kwargs)
+                    func_async.start()
+
+                    # Send keep-alive and monitor whether task has not been
+                    # canceled yet.
+                    keep_alive_helper = 0
+                    is_stopped = False
+                    while func_async.is_alive():
+                        sleep(0.1)
+                        keep_alive_helper += 1
+                        # Keep-alive every (0.1 * 200) == 20 seconds
+                        if keep_alive_helper == 200:
+                            if not self._keep_alive(task_settings, task_id):
+                                is_stopped = True
+                                func_async.stop()
+                            keep_alive_helper = 0
+
+                    if not ignore_result:
+                        func_result = func_async.get_result()
+                        if isinstance(func_result, str):
+                            register.send(task_error, unique_id=unique_id,
+                                exception=func_result)
+                        else:
+                            register.send(task_finished, unique_id=unique_id,
+                                _is_stopped=is_stopped, **func_result)
+
+                    self._acknowledge(task_settings, task_id)
                 except Exception as exp:
-                    logger.exception("Error when calling task '%s'.", task_name)
-                    if results is not None:
-                        register.send(task_name + '_' + self.HS_ERROR,
-                            unique_id=unique_id, exception=traceback.format_exc())
-            register.register(task_name, wrapped_func)
-            if results is not None:
-                task_settings = {}
-                if isinstance(results, str):
-                    backend_group = 'default'
-                    queue_name = results
-                elif isinstance(results, tuple):
-                    backend_group = results[0]
-                    queue_name = results[1]
-                else:
-                    raise RegisterError("Incorrect argument to Register.task decorator."
-                        " 'results' can only be queue_name or (backend, queue_name)")
-                for handler_status in self.HANDLER_STATUS_LIST:
-                    register.register_available_task(task_name + '_' + handler_status, \
-                        {'backend_group': backend_group, 'queue_name': queue_name})
+                    logger.exception("Exception was raised while calling the task '%s'.", task_uid)
+                    if not ignore_result:
+                        register.send(task_error, unique_id=unique_id,
+                            exception=traceback.format_exc())
+
+            register.register(task_uid, wrapped_func)
             return func
         return wrapper
 
+    def _task_CALLBACK_TYPE_callback(self, callback_type, task_uid):
+        """Template of callback function decorator.
+        """
+        if isinstance(task_uid, int):
+            _task_str_uid = unicode(task_uid)
+        else:
+            _task_str_uid = task_uid
+
+        callback_task_uid = _task_str_uid + ':' + callback_type
+        return self.task(task_uid=callback_task_uid, ignore_result=True)
+
 
 register = Register()
-

@@ -16,8 +16,8 @@ class RedisBackend(BaseBackend):
     LOCK_SUFFIX = ':locked'
     QUEUE_KEY_PREFIX = 'dq:q:'
     RECEIVED_TASKS_QUEUE_SUFFIX = ':received'
-    RECEIVED_TASKS_RESTORE_INTERVAL = 600
-    RECEIVED_TASKS_RESTORE_COUNT_LIMIT = 1 #000
+    RECEIVED_TASKS_RESTORE_INTERVAL = 60
+    RECEIVED_TASKS_RESTORE_COUNT_LIMIT = 1000
     POP_TASK_RETRIES_COUNT = 5
     TASK_KEY_PREFIX = 'dq:t:'
     LAST_TASK_ID_KEY = 'dq:t::last_id'
@@ -77,13 +77,18 @@ class RedisBackend(BaseBackend):
             end
         end'''
 
-    def __init__(self, host='localhost', port=6379, database=0, unique_server_name=None):
+    def __init__(self, host='localhost', port=6379, database=0, worker_uid=None):
         """Create RedisBackend, set:
-            `host` where redis resides (default: localhost)
+            `host` where Redis resides (default: localhost);
+            `port` is Redis' listening port (default: 6379);
+            `database` is Redis' database id, there is no names for Redis
+                databases, it has to be integer value;
+            `worker_uid` is unique server name, is used only as locking value
+                that can help with monitoring of distributed queue process;
         """
-        if unique_server_name is None:
-            raise ValueError("unique_server_name should not be None.")
-        self.unique_server_name = unique_server_name
+        if worker_uid is None:
+            raise ValueError("worker_uid should not be None.")
+        self.worker_uid = worker_uid
         self.queue = redis.StrictRedis(host=host, port=port, db=database)
         self._lua_pop_task = self.queue.register_script(
             self.REDIS_LUA_POP_TASK_FUNCTION_TEMPLATE \
@@ -93,7 +98,7 @@ class RedisBackend(BaseBackend):
                     'task_key_prefix': self.TASK_KEY_PREFIX,
                     'lock_suffix': self.LOCK_SUFFIX,
                     'lock_timeout': self.TASK_LOCK_TIMEOUT,
-                    'server_name': self.unique_server_name,
+                    'server_name': self.worker_uid,
                 }
         )
         self._lua_restore_tasks = self.queue.register_script(
@@ -145,9 +150,7 @@ class RedisBackend(BaseBackend):
                 for queue_name in queue_name_list:
                     task = self._pop_task(queue_name)
                     if task:
-                        break
-                if task:
-                    break
+                        return task
                 # _lua_pop_task stores received tasks in another list in Redis,
                 # so we have to return the tasks from that list to the original
                 # queue once in a while. This is necessary in case when someone
@@ -158,22 +161,47 @@ class RedisBackend(BaseBackend):
                     # Lock the restoring process for the queue
                     if self.queue.set(
                             self.QUEUE_KEY_PREFIX + queue_name + self.LOCK_SUFFIX,
-                            self.unique_server_name,
+                            self.worker_uid,
                             ex=self.RECEIVED_TASKS_RESTORE_INTERVAL, nx=True):
                         self._restore_tasks(queue_name)
                         break
-                time.sleep(timeout_interval)
                 if timeout > 0:
                     timeout -= timeout_interval
                     if timeout <= 0:
                         return
+                time.sleep(timeout_interval)
         except redis.ConnectionError as e:
             raise BackendConnectionError(e)
-        return task
 
-    def keep_alive(self, task_id):
-        """Worker has to inform queue that he is still working on the task.
+    def keep_alive(self, task_id, queue_name=None):
+        """Worker has to inform queue that it is still working on the task.
         As we use task locks, just update expiration time.
+        In addition to updating expiration lock time, we check if task still
+        exists.
         """
-        self.queue.expire(self.TASK_KEY_PREFIX + task_id + self.LOCK_SUFFIX,
-            self.TASK_LOCK_TIMEOUT)
+        task_exists = self.queue.exists(self.TASK_KEY_PREFIX + task_id)
+        if not task_exists:
+            return False
+        # EXPIRE returns 1 if operation was successful and 0 otherwise.
+        if self.queue.expire(self.TASK_KEY_PREFIX + task_id + self.LOCK_SUFFIX,
+            self.TASK_LOCK_TIMEOUT) == 0:
+            return False
+        return True
+        
+    def delete(self, task_id, queue_name=None):
+        """We delete the task information and Task ID will be removed from the
+        queue's list eventually on the step of receiving new tasks.
+        """
+        self.queue.delete(self.TASK_KEY_PREFIX + task_id)
+
+    def acknowledge(self, task_id, queue_name=None):
+        """Acknowledge the task (mark as done). In case of Redis backend it
+        means that we have to delete the task information.
+        """
+        self.delete(task_id, queue_name=queue_name)
+
+    def reject(self, task_id, queue_name=None):
+        """Reject the task. In case of Redis backend it means that we have to
+        delete the task information.
+        """
+        self.delete(task_id, queue_name=queue_name)
