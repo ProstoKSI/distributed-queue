@@ -1,11 +1,12 @@
-import os
+import re
 from setuptools import setup, find_packages
 
-from distributed_queue import VERSION, PROJECT
+with open('distributed_queue/version.py') as version_file:
+    __version__ = re.findall("__version__ = '([^']*)'", version_file.read())[0]
 
 META_DATA = dict(
-    name=PROJECT,
-    version=VERSION,
+    name='distributed-queue',
+    version=__version__,
 
     author="ProstoKSI",
     author_email="prostoksi@gmail.com",
