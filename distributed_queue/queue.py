@@ -455,7 +455,7 @@ class Register(object):
                             register.send(task_error, exception=func_result,
                                 **preserved_args)
                         else:
-                            register.send(task_finished, _is_stopped=is_stopped,
+                            register.send(task_finished, _was_stopped=is_stopped,
                                 **dict(preserved_args, **func_result))
 
                     self._acknowledge(task_settings, task_id)
