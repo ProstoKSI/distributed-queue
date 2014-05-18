@@ -115,13 +115,22 @@ class RedisBackend(BaseBackend):
         return str(self.queue.incr(self.LAST_TASK_ID_KEY))
 
     def send(self, queue_name, item):
-        """Enqueue element to specified queue in Redis"""
+        """Enqueue element to specified queue in Redis.
+
+        Returns unique task id.
+        """
+        task_id = None
         try:
             task_id = self._generate_task_id()
             self.queue.set(self.TASK_KEY_PREFIX + task_id, item)
             self.queue.lpush(self.QUEUE_KEY_PREFIX + queue_name, task_id)
         except redis.ConnectionError:
+            if task_id is not None:
+                logger.warning("Task was created, but connection failed in "
+                    "the middle of the process. Task with id = %s probably "
+                    "leaked.", task_id)
             raise BackendConnectionError
+        return task_id
 
     def _pop_task(self, queue_name):
         """Smart implementation of poping task from queue to avoid tasks loss.

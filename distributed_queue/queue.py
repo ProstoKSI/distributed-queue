@@ -46,6 +46,10 @@ class StoppableThread(threading.Thread):
                 # Avoid a refcycle if the thread is running a function with
                 # an argument that has a member that points to the thread.
                 del self.__target, self.__args, self.__kwargs
+            if func_result is None:
+                func_result = {}
+            elif not isinstance(func_result, dict):
+                raise TypeError("Task has to return a dict or None.")
         except Exception:
             self.__result_queue.put(traceback.format_exc())
         else:
@@ -159,21 +163,19 @@ class DistributedQueue(object):
         item = backend_settings['serializer'].dumps((task, args, kwargs))
         while 1:
             try:
-                backend_settings['backend'].send(queue_name, item)
+                return backend_settings['backend'].send(queue_name, item)
             except BackendConnectionError:
                 if retries > 0:
                     retries -= 1
                     if retries <= 0:
                         raise
                     sleep(1)
-            else:
-                break
 
     def send(self, task, *args, **kwargs):
         """Send task shortcut for pythonic execution style.
         `.send('build_model', arg1, arg2, kw1=1, kw2=2)`
         """
-        self.send_custom(task, args, kwargs)
+        return self.send_custom(task, args, kwargs)
 
     def receive(self, backend_settings_group=None, queue_name=None, timeout=0):
         """Receive task from distributed queue, with deserializing from string
@@ -262,11 +264,11 @@ class DistributedQueue(object):
                 received_data = self.receive(backend_settings_group=backend_settings_group)
                 if received_data is not None:
                     task_id, (task, args, kwargs) = received_data
+                    logger.debug("Received task '%s' with id = %s", task, task_id)
                     try:
                         register.process(task_id, task, args, kwargs)
                     except NotRegisteredError:
                         self.reject(task_id, backend_settings_group=backend_settings_group)
-                        logger.warning("Received unexpected task '%s'" % task)
                     except Exception as e:
                         logger.exception(e)
                     else:
@@ -322,9 +324,11 @@ class Register(object):
     def _send(self, task_settings, *args, **kwargs):
         """Send task to specified queue via specified backend
         """
+        logger.debug("Sending task '%s'", task_settings['task_uid'])
         self.task_queue.send_custom(task_settings['task_uid'], args, kwargs,
             backend_settings_group=task_settings.get('backend_settings'),
             queue_name=task_settings.get('static_route_queue'))
+        logger.debug("Task '%s' is sent", task_settings['task_uid'])
 
     def send(self, task_uid, *args, **kwargs):
         """Send task based on registry
@@ -337,6 +341,7 @@ class Register(object):
     def _keep_alive(self, task_settings, task_id):
         """Send keep-alive message and return True if task has been canceled
         """
+        logger.debug("Keeping alive task with id = %s", task_id)
         return self.task_queue.keep_alive(task_id,
             backend_settings_group=task_settings.get('backend_settings'),
             queue_name=task_settings.get('static_route_queue'))
@@ -344,6 +349,7 @@ class Register(object):
     def _acknowledge(self, task_settings, task_id):
         """Send keep-alive message and return True if task has been canceled
         """
+        logger.debug("Acknowledging task with id = %s", task_id)
         return self.task_queue.acknowledge(task_id,
             backend_settings_group=task_settings.get('backend_settings'),
             queue_name=task_settings.get('static_route_queue'))
@@ -423,21 +429,21 @@ class Register(object):
             raise NotRegisteredError
         kwargs['dq_task_settings'] = self.registered_available_tasks[task]
         kwargs['dq_task_id'] = task_id
-        if 'unqiue_id' not in kwargs:
-            kwargs['unique_id'] = task_id
         self.registered_task_processors[task](*args, **kwargs)
 
-    def task(self, task_uid=None, ignore_result=False):
+    def task(self, task_uid=None, ignore_result=False, preserve_args=None):
         """This is a decorator, which registers a decorated function as a task.
         It will not change the function behaviour if it executes directly.
-
-        `results` argument specifies `queue name` or tuple of
-        (`backend settings group`, `queue name`) where to send
-        started/finished/error callbacks.
 
         `task_uid` is a unique task function identifier, which is synced
         between master and workers. It's suggested to use integers, but you can
         use strings as well.
+
+        `ignore_results` is a boolean flag than is used to determine whether or
+        not task status callbacks ought to be sent.
+
+        `preserver_args` is a list of arguments that task will receive and will
+        send back with status callbacks.
         """
         if isinstance(task_uid, int):
             _task_str_uid = unicode(task_uid)
@@ -457,10 +463,11 @@ class Register(object):
                 task_settings = kwargs.pop('dq_task_settings')
                 task_id = kwargs.pop('dq_task_id')
                 if not ignore_result:
-                    unique_id = kwargs.pop('unique_id', None)
-                    register.send(task_started, unique_id=unique_id)
+                    preserved_args = {arg: kwargs[arg] for arg in preserve_args}
+                    register.send(task_started, **preserved_args)
                 try:
                     # Run user's function asyncronously, use thread to do that.
+                    print func, args, kwargs
                     func_async = StoppableThread(target=func, args=args, kwargs=kwargs)
                     func_async.start()
 
@@ -478,21 +485,27 @@ class Register(object):
                                 func_async.stop()
                             keep_alive_helper = 0
 
+                    if is_stopped:
+                        logger.info("Task with id = %s was stopped.", task_id)
+
+                    func_result = func_async.get_result()
+                    if isinstance(func_result, str):
+                        logger.error("Exception was raised while calling "
+                            "the task '%s'.\n%s", task_uid, func_result)
                     if not ignore_result:
-                        func_result = func_async.get_result()
                         if isinstance(func_result, str):
-                            register.send(task_error, unique_id=unique_id,
-                                exception=func_result)
+                            register.send(task_error, exception=func_result,
+                                **preserved_args)
                         else:
-                            register.send(task_finished, unique_id=unique_id,
-                                _is_stopped=is_stopped, **func_result)
+                            register.send(task_finished, _is_stopped=is_stopped,
+                                **dict(preserved_args, **func_result))
 
                     self._acknowledge(task_settings, task_id)
                 except Exception as exp:
                     logger.exception("Exception was raised while calling the task '%s'.", task_uid)
                     if not ignore_result:
-                        register.send(task_error, unique_id=unique_id,
-                            exception=traceback.format_exc())
+                        register.send(task_error, exception=traceback.format_exc(),
+                            **preserved_args)
 
             register.register(task_uid, wrapped_func)
             return func
