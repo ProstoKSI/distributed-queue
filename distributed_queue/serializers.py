@@ -18,7 +18,7 @@ class BaseSerializer(object):
 
 class JsonSerializer(BaseSerializer):
     """Json serializer to convert objects to json strings and back"""
-   
+
     @staticmethod
     def dumps(obj):
         """Serialize given object to JSON-string"""
@@ -28,4 +28,3 @@ class JsonSerializer(BaseSerializer):
     def loads(data):
         """De-serialize given JSON-string to object"""
         return json.loads(data)
-

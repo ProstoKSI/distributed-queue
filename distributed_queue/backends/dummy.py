@@ -7,11 +7,12 @@ from Queue import Queue
 
 from distributed_queue.backends import BaseBackend
 
+
 class DummyBackend(BaseBackend):
     """DummyBackend for DistributedQueue for local testing.
     Uses local queue internally.
     """
-    
+
     def __init__(self):
         """Create DummyBackend"""
         self.queues = {}
@@ -24,12 +25,11 @@ class DummyBackend(BaseBackend):
 
     def receive(self, queue_name_list, timeout=0):
         """Pop element from local queue.
-        
+
         Limitations:
         - Elements pop immidiatelly, there is no waiting interval;
         - Timeout is ignored.
         """
-        print(queue_name_list, self.queues)
         for queue_name in queue_name_list:
             if queue_name in self.queues:
                 return self.queues[queue_name].get()

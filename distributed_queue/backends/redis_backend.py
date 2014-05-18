@@ -1,10 +1,13 @@
 """Redis backend module for Distributed Queue
 """
 
+import logging
 import redis
 import time
 
 from distributed_queue.backends import BaseBackend, BackendConnectionError
+
+logger = logging.getLogger('distributed_queue')
 
 
 class RedisBackend(BaseBackend):
@@ -12,7 +15,7 @@ class RedisBackend(BaseBackend):
     """
 
     BACKEND_NAME = 'redis'
-    
+
     LOCK_SUFFIX = ':locked'
     QUEUE_KEY_PREFIX = 'dq:q:'
     RECEIVED_TASKS_QUEUE_SUFFIX = ':received'
@@ -112,6 +115,9 @@ class RedisBackend(BaseBackend):
         )
 
     def _generate_task_id(self):
+        """Generate unique task id. We use one incrementing key in Redis for
+        this.
+        """
         return str(self.queue.incr(self.LAST_TASK_ID_KEY))
 
     def send(self, queue_name, item):
@@ -145,7 +151,7 @@ class RedisBackend(BaseBackend):
     def receive(self, queue_name_list, timeout=0):
         """Safely dequeue element from Redis queue.
         Note: receive() should never lose a task!
-        
+
         If timeout is 0, then block until receives a task.
         """
         if timeout == 0:
@@ -182,6 +188,7 @@ class RedisBackend(BaseBackend):
         except redis.ConnectionError as e:
             raise BackendConnectionError(e)
 
+    # pylint: disable=W0613
     def keep_alive(self, task_id, queue_name=None):
         """Worker has to inform queue that it is still working on the task.
         As we use task locks, just update expiration time.
@@ -196,13 +203,14 @@ class RedisBackend(BaseBackend):
             self.TASK_LOCK_TIMEOUT) == 0:
             return False
         return True
-        
+
     def delete(self, task_id, queue_name=None):
         """We delete the task information and Task ID will be removed from the
         queue's list eventually on the step of receiving new tasks.
         """
         self.queue.delete(self.TASK_KEY_PREFIX + task_id)
 
+    # pylint: disable=W0613
     def acknowledge(self, task_id, queue_name=None):
         """Acknowledge the task (mark as done). In case of Redis backend it
         means that we have to delete the task information.

@@ -6,61 +6,9 @@ import traceback
 
 from distributed_queue import core, serializers, routers
 from .backends import BackendConnectionError
+from .utils import StoppableThread
 
 logger = logging.getLogger('distributed_queue')
-
-# TODO: move it to utils or even pymisc
-import Queue
-import threading
-class StoppableThread(threading.Thread):
-    """This is thread can be stopped.
-    
-    Note: Thread by default does not return function result in any case,
-    which is why I've implemented this workaroung with built-in Queue.
-    """
-    def __init__(self, **kwargs):
-        super(StoppableThread, self).__init__(**kwargs)
-        self.__target = kwargs.get('target')
-        self.__args = kwargs.get('args')
-        if self.__args is None:
-            self.__args = ()
-        self.__kwargs = kwargs.get('kwargs')
-        if self.__kwargs is None:
-            self.__kwargs = {}
-        self.__result_queue = Queue.Queue()
-        self.__stopped = threading.Event()
-
-    def stop(self):
-        self.__stopped.set()
-
-    def is_stopped(self):
-        return self.__stopped.is_set()
-
-    def run(self):
-        try:
-            self.__kwargs['_is_stopped'] = self.__stopped.is_set
-            try:
-                if self.__target:
-                    func_result = self.__target(*self.__args, **self.__kwargs)
-            finally:
-                # Avoid a refcycle if the thread is running a function with
-                # an argument that has a member that points to the thread.
-                del self.__target, self.__args, self.__kwargs
-            if func_result is None:
-                func_result = {}
-            elif not isinstance(func_result, dict):
-                raise TypeError("Task has to return a dict or None.")
-        except Exception:
-            self.__result_queue.put(traceback.format_exc())
-        else:
-            self.__result_queue.put(func_result)
-
-    def get_result(self):
-        self.join()
-        try:
-            return self.__result_queue.get_nowait()
-        except Queue.Empty:
-            return None
 
 
 class DistributedQueueError(Exception):
@@ -87,7 +35,7 @@ DEFAULT_BACKEND_SETTINGS_GROUP = 'default'
 class DistributedQueue(object):
     """DistributedQueue - inteface for distributed queues
     """
-    
+
     def __init__(self, queue_settings):
         """Create DistributedQueue by specifying queue settings.
         QUEUES_SETTINGS = {
@@ -121,7 +69,7 @@ class DistributedQueue(object):
                 if backend_preferences['default_queue'] not in backend_preferences['queues']:
                     raise DistributedQueueError("`default_queue` should be listed in `queues`")
                 router = routers.DefaultRouter(backend_preferences.pop('default_queue'))
-                
+
             backend_settings = {
                 'serializer': backend_preferences.pop('serializer', serializers.JsonSerializer()),
                 'router': router,
@@ -140,6 +88,7 @@ class DistributedQueue(object):
             backend_settings['backend'] = backend
             self.backends[settings_group] = backend_settings
 
+    # pylint: disable=R0913
     def send_custom(self, task, args, kwargs, backend_settings_group=None,
             queue_name=None, retries=1):
         """Send task to distributed queue, with serializing to string
@@ -159,7 +108,8 @@ class DistributedQueue(object):
             backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
         backend_settings = self.backends[backend_settings_group]
         if queue_name is None:
-            queue_name = backend_settings['router'].get_queue_name(self.backends, task, args, kwargs)
+            queue_name = backend_settings['router']\
+                .get_queue_name(self.backends, task, args, kwargs)
         item = backend_settings['serializer'].dumps((task, args, kwargs))
         while 1:
             try:
@@ -179,7 +129,7 @@ class DistributedQueue(object):
 
     def receive(self, backend_settings_group=None, queue_name=None, timeout=0):
         """Receive task from distributed queue, with deserializing from string
-        
+
         If timeout is 0, then block indefinitely.
         """
         # Don't move this to default argument value as we want to accept None
@@ -201,7 +151,7 @@ class DistributedQueue(object):
                     sleep(1)
             else:
                 break
-        if task_id is None: 
+        if task_id is None:
             return None
         return task_id, backend_settings['serializer'].loads(serialized_task)
 
@@ -231,6 +181,7 @@ class DistributedQueue(object):
         if backend_settings_group is None:
             backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
         backend_settings = self.backends[backend_settings_group]
+        # pylint: disable=W0612
         for retries_left in xrange(retries, 0, -1):
             try:
                 backend_settings['backend'].acknowledge(task_id, queue_name=queue_name)
@@ -263,23 +214,24 @@ class DistributedQueue(object):
             try:
                 received_data = self.receive(backend_settings_group=backend_settings_group)
                 if received_data is not None:
+                    # pylint: disable=W0633
                     task_id, (task, args, kwargs) = received_data
                     logger.debug("Received task '%s' with id = %s", task, task_id)
                     try:
                         register.process(task_id, task, args, kwargs)
                     except NotRegisteredError:
                         self.reject(task_id, backend_settings_group=backend_settings_group)
-                    except Exception as e:
-                        logger.exception(e)
+                    except Exception:
+                        logger.exception("Unexpected error")
                     else:
-                        logger.info("Task '%s' is finished" % task)
+                        logger.info("Task '%s' is finished", task)
                 else:
                     sleep(1)
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupted")
                 break
-            except Exception as e:
-                logger.exception(e)
+            except Exception:
+                logger.exception("Unexpected error")
 
 
 class Register(object):
@@ -290,19 +242,22 @@ class Register(object):
     CT_FINISHED = 'finished'
     CT_ERROR = 'error'
     CALLBACK_TYPE_LIST = [CT_STARTED, CT_FINISHED, CT_ERROR]
-    
+
     registered_task_processors = {}
     registered_available_tasks = {}
     task_queue = None
 
     def __init__(self):
         def register_callback_type_decorator(callback_type):
+            """Helper function to register user-friendly methods of callback
+            registrator decorators.
+            """
             self.__dict__['task_%s_callback' % callback_type] = lambda *args, **kwargs: \
                 self._task_CALLBACK_TYPE_callback(callback_type, *args, **kwargs)
 
         for callback_type in self.CALLBACK_TYPE_LIST:
             register_callback_type_decorator(callback_type)
-    
+
     def attach_task_queue(self, task_queue):
         """Attach 'task_queue' to registry as queue to use for sending outgoing tasks
         """
@@ -319,7 +274,7 @@ class Register(object):
                 "available tasks. Register available tasks before registering "
                 "processors.")
         self.registered_task_processors[task_uid] = func
-        logger.info("Task processor for task '%s' is registered." % task_uid)
+        logger.info("Task processor for task '%s' is registered.", task_uid)
 
     def _send(self, task_settings, *args, **kwargs):
         """Send task to specified queue via specified backend
@@ -369,8 +324,8 @@ class Register(object):
         if func_name is not None:
             self.__dict__['send_' + func_name] = lambda *args, **kwargs: \
                 self._send(task_settings, *args, **kwargs)
-        logger.info("Task %s is available now." \
-            % ("'%s' (%s)" % (task_uid, func_name) if func_name else "'%s'" % task_uid))
+        logger.info("Task %s is available now.",
+            "'%s' (%s)" % (task_uid, func_name) if func_name else "'%s'" % task_uid)
         if 'callbacks_queue_settings' in task_settings:
             for callback_type in self.CALLBACK_TYPE_LIST:
                 try:
@@ -380,8 +335,8 @@ class Register(object):
                     })
                 except RegisterError:
                     logger.debug("Callback '%s' couldn't be registered for "
-                        "task uid '%s'. Exception:\n%s" \
-                            % (callback_type, task_uid, traceback.format_exc()))
+                        "task uid '%s'. Exception:\n%s",
+                            callback_type, task_uid, traceback.format_exc())
 
     def register_available_tasks(self, available_tasks):
         """Register available remote tasks. We need only task id to get
@@ -431,6 +386,7 @@ class Register(object):
         kwargs['dq_task_id'] = task_id
         self.registered_task_processors[task](*args, **kwargs)
 
+    # pylint: disable=R0912
     def task(self, task_uid=None, ignore_result=False, preserve_args=None):
         """This is a decorator, which registers a decorated function as a task.
         It will not change the function behaviour if it executes directly.
@@ -457,7 +413,7 @@ class Register(object):
             """Wrapper that registers the task.
             """
             def wrapped_func(*args, **kwargs):
-                """Wrapped function that will be called by register 
+                """Wrapped function that will be called by register
                 when an appropriate task is received
                 """
                 task_settings = kwargs.pop('dq_task_settings')
@@ -467,7 +423,6 @@ class Register(object):
                     register.send(task_started, **preserved_args)
                 try:
                     # Run user's function asyncronously, use thread to do that.
-                    print func, args, kwargs
                     func_async = StoppableThread(target=func, args=args, kwargs=kwargs)
                     func_async.start()
 
@@ -501,7 +456,7 @@ class Register(object):
                                 **dict(preserved_args, **func_result))
 
                     self._acknowledge(task_settings, task_id)
-                except Exception as exp:
+                except Exception: # pylint: disable=W0703
                     logger.exception("Exception was raised while calling the task '%s'.", task_uid)
                     if not ignore_result:
                         register.send(task_error, exception=traceback.format_exc(),

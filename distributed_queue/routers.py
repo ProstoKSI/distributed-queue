@@ -3,10 +3,10 @@
 
 class BaseRouter(object):
     """Base class for task routing"""
-    
+
     def get_queue_name(self, queue_settings, task, args, kwargs):
         """Return queue_name by given queue settings, task name, its args and kwargs."""
-        raise NotImplementedError()    
+        raise NotImplementedError()
 
 
 class DefaultRouter(BaseRouter):
