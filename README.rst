@@ -1,3 +1,6 @@
+.. image::  https://travis-ci.org/ProstoKSI/distributed-queue.svg?branch=master
+   :target: https://travis-ci.org/ProstoKSI/distributed-queue
+
 distributed-queue
 =================
 
