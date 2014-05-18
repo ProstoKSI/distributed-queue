@@ -15,7 +15,7 @@ Supported backends
 Requirements
 ============
 
-- python 2.7
+- python 2.7, 3.2, 3.3, 3.4 or PyPy
 - python-redis
 
 Installation
