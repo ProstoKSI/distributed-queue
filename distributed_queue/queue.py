@@ -472,13 +472,24 @@ class Register(object):
     def _task_CALLBACK_TYPE_callback(self, callback_type, task_uid):
         """Template of callback function decorator.
         """
+        def default_error_handler_decorator(task_wrapper):
+            def wrapper(func):
+                def wrapped_func(*args, **kwargs):
+                    logger.error("Task crashed on a backend with exception:\n%s", kwargs['exception'])
+                    func(*args, **kwargs)
+                return task_wrapper(wrapped_func)
+            return wrapper
         if isinstance(task_uid, int):
             _task_str_uid = six.text_type(task_uid)
         else:
             _task_str_uid = task_uid
 
         callback_task_uid = _task_str_uid + ':' + callback_type
-        return self.task(task_uid=callback_task_uid, ignore_result=True)
+        wrapper = self.task(task_uid=callback_task_uid, ignore_result=True)
+        # Set default error handler
+        if callback_type == self.CT_ERROR:
+            return default_error_handler_decorator(wrapper)
+        return wrapper
 
 
 register = Register()
