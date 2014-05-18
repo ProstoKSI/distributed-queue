@@ -1,6 +1,7 @@
 """Main module with DistributeQueue class"""
 
 import logging
+import six
 from time import sleep
 import traceback
 
@@ -56,7 +57,7 @@ class DistributedQueue(object):
         """
         register.attach_task_queue(self)
         self.backends = {}
-        for settings_group, backend_preferences in queue_settings.iteritems():
+        for settings_group, backend_preferences in six.iteritems(queue_settings):
             if 'backend' not in backend_preferences:
                 raise DistributedQueueError("`backend` is required option for backend settings")
             if 'queues' not in backend_preferences:
@@ -153,6 +154,7 @@ class DistributedQueue(object):
                 break
         if received_data is None:
             return None
+        # pylint: disable=W0633
         task_id, serialized_task = received_data
         return task_id, backend_settings['serializer'].loads(serialized_task)
 
@@ -182,8 +184,8 @@ class DistributedQueue(object):
         if backend_settings_group is None:
             backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
         backend_settings = self.backends[backend_settings_group]
-        # pylint: disable=W0612
-        for retries_left in xrange(retries, 0, -1):
+        # pylint: disable=W0612,E1101
+        for retries_left in six.moves.range(retries, 0, -1):
             try:
                 backend_settings['backend'].acknowledge(task_id, queue_name=queue_name)
             except BackendConnectionError:
@@ -375,7 +377,7 @@ class Register(object):
         """
         if isinstance(available_tasks, list):
             available_tasks = {name: {'task_uid': name} for name in available_tasks}
-        for func_name, task_settings in available_tasks.iteritems():
+        for func_name, task_settings in six.iteritems(available_tasks):
             self.register_available_task(func_name, task_settings)
 
     def process(self, task_id, task, args, kwargs):
@@ -403,7 +405,7 @@ class Register(object):
         send back with status callbacks.
         """
         if isinstance(task_uid, int):
-            _task_str_uid = unicode(task_uid)
+            _task_str_uid = six.text_type(task_uid)
         else:
             _task_str_uid = task_uid
         task_started = _task_str_uid + ':' + self.CT_STARTED
@@ -471,7 +473,7 @@ class Register(object):
         """Template of callback function decorator.
         """
         if isinstance(task_uid, int):
-            _task_str_uid = unicode(task_uid)
+            _task_str_uid = six.text_type(task_uid)
         else:
             _task_str_uid = task_uid
 

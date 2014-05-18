@@ -8,5 +8,7 @@ env:
   - TOXENV=pypy
 install:
   - travis_retry pip install tox==1.7.1
+  - if [[ $TRAVIS_PYTHON_VERSION == 2* ]]; then pip install unittest2; fi
+  - if [[ $TRAVIS_PYTHON_VERSION == 3* ]]; then pip install unittest2py3k; fi
 script:
   - travis_retry tox

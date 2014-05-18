@@ -2,7 +2,8 @@
 """Useful utils for distributed queue will be here.
 """
 
-import Queue
+# pylint: disable=F0401,E0611
+from six.moves.queue import Queue
 import threading
 import traceback
 
@@ -22,7 +23,7 @@ class StoppableThread(threading.Thread):
         self.__kwargs = kwargs.get('kwargs')
         if self.__kwargs is None:
             self.__kwargs = {}
-        self.__result_queue = Queue.Queue()
+        self.__result_queue = Queue()
         self.__stopped = threading.Event()
 
     def stop(self):

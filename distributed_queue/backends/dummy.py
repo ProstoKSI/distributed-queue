@@ -3,7 +3,8 @@ Implementation of dummy backend is based on local queue.
 Use it only for testing purposes - it's not distributed.
 """
 
-from Queue import Queue
+# pylint: disable=F0401,E0611
+from six.moves.queue import Queue
 
 from distributed_queue.backends import BaseBackend
 

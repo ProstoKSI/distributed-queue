@@ -43,6 +43,8 @@ disable=C0103,C0330,R0921,R0922,W0142,I0011,I0012,I0013
 # mypackage.mymodule.MyReporterClass.
 output-format=colorized
 
+msg-template=template={path}:{line}: [{msg_id}({symbol}), {obj}] {msg}
+
 # Include message's id in output
 include-ids=no
 
