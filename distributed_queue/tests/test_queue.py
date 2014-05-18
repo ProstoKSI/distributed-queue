@@ -10,21 +10,39 @@ class TestQueue(unittest.TestCase):
 
     def test_push_queue_mock(self):
         backend = Mock()
-        queue = DistributedQueue({'default': {'backend': backend, 'default_queue': 'test', 'queues': ['test']}})
+        queue = DistributedQueue({
+            'default': {
+                'backend': backend,
+                'default_queue': 'test',
+                'queues': ['test']
+            }
+        })
         original_task = 'task'
         original_args = [1, 2, 3]
         original_kwargs = {'a': 1, 'b': 2}
         queue.send(original_task, original_args, original_kwargs)
 
     def test_pop_queue_mock(self):
+        original_task_id = 1
         original_task = 'task'
         original_args = [1, 2, 3]
         original_kwargs = {'a': 1, 'b': 2}
         backend = Mock()
-        backend.receive = Mock(return_value=json.dumps((original_task, original_args, original_kwargs)))
-        queue = DistributedQueue({'default': {'backend': backend, 'default_queue': 'test', \
-            'serializer': JsonSerializer(), 'queues': ['test']}})
-        task, args, kwargs = queue.receive()
+        backend.receive = Mock(
+            return_value=(
+                original_task_id,
+                json.dumps((original_task, original_args, original_kwargs))
+            )
+        )
+        queue = DistributedQueue({
+            'default': {
+                'backend': backend,
+                'default_queue': 'test',
+                'serializer': JsonSerializer(),
+                'queues': ['test']
+            }
+        })
+        task_id, (task, args, kwargs) = queue.receive()
         self.assertTrue(task == original_task)
         self.assertTrue(args == original_args)
         self.assertTrue(kwargs == original_kwargs)
@@ -33,17 +51,23 @@ class TestQueue(unittest.TestCase):
         self.assertEqual(item, None)
 
     def test_queue_dummy(self):
-        queue = DistributedQueue({'default': {'backend': 'dummy', 'default_queue': 'test', 'queues': ['test']}})
+        queue = DistributedQueue({
+            'default': {
+                'backend': 'dummy',
+                'default_queue': 'test',
+                'queues': ['test']
+            }
+        })
         original_task = 'task'
         original_args = [1, 2, 3]
         original_kwargs = {'a': 1, 'b': 2}
         queue.send(original_task, *original_args, **original_kwargs)
         queue.send_custom(original_task, original_args, original_kwargs, queue_name='test')
-        task, args, kwargs = queue.receive()
+        task_id, (task, args, kwargs) = queue.receive()
         self.assertTrue(task == original_task)
         self.assertTrue(args == original_args)
         self.assertTrue(kwargs == original_kwargs)
-        task, args, kwargs = queue.receive(queue_name='test')
+        task_id, (task, args, kwargs) = queue.receive(queue_name='test')
         self.assertTrue(task == original_task)
         self.assertTrue(args == original_args)
         self.assertTrue(kwargs == original_kwargs)

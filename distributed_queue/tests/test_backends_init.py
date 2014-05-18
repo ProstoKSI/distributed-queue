@@ -27,7 +27,7 @@ class TestBackend(unittest.TestCase):
         test_data = 'test 1 2 3'
         backend.send('test', test_data)
         item = backend.receive(['test'])
-        self.assertTrue(item == test_data)
+        self.assertTrue(item[1] == test_data)
         item = backend.receive(['other'])
         self.assertEqual(item, None)
 

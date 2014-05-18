@@ -138,10 +138,10 @@ class DistributedQueue(object):
             backend_settings_group = DEFAULT_BACKEND_SETTINGS_GROUP
         backend_settings = self.backends[backend_settings_group]
         queue_name_list = [queue_name] if queue_name is not None else backend_settings['queues']
-        task_id = None
+        received_data = None
         while 1:
             try:
-                task_id, serialized_task = backend_settings['backend']\
+                received_data = backend_settings['backend']\
                     .receive(queue_name_list, timeout=timeout)
             except BackendConnectionError:
                 if timeout != 0:
@@ -151,8 +151,9 @@ class DistributedQueue(object):
                     sleep(1)
             else:
                 break
-        if task_id is None:
+        if received_data is None:
             return None
+        task_id, serialized_task = received_data
         return task_id, backend_settings['serializer'].loads(serialized_task)
 
     def keep_alive(self, task_id, backend_settings_group=None, queue_name=None):

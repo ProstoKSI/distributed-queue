@@ -16,12 +16,14 @@ class DummyBackend(BaseBackend):
     def __init__(self):
         """Create DummyBackend"""
         self.queues = {}
+        self.last_task_id = 0
 
     def send(self, queue_name, item):
         """Push element into local queue"""
         if queue_name not in self.queues:
             self.queues[queue_name] = Queue()
-        self.queues[queue_name].put(item)
+        self.last_task_id += 1
+        self.queues[queue_name].put((self.last_task_id, item))
 
     def receive(self, queue_name_list, timeout=0):
         """Pop element from local queue.
