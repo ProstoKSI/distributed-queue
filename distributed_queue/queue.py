@@ -63,23 +63,24 @@ class DistributedQueue(object):
             if 'queues' not in backend_preferences:
                 raise DistributedQueueError("`queues` is required option for backend settings")
 
-            router = backend_preferences.pop('router', None)
+            _backend_preferences = backend_preferences.copy()
+            router = _backend_preferences.pop('router', None)
             if router is None:
                 if 'default_queue' not in backend_preferences:
                     raise DistributedQueueError("`queues` is required option for backend settings")
                 if backend_preferences['default_queue'] not in backend_preferences['queues']:
                     raise DistributedQueueError("`default_queue` should be listed in `queues`")
-                router = routers.DefaultRouter(backend_preferences.pop('default_queue'))
+                router = routers.DefaultRouter(_backend_preferences.pop('default_queue'))
 
             backend_settings = {
-                'serializer': backend_preferences.pop('serializer', serializers.JsonSerializer()),
+                'serializer': _backend_preferences.pop('serializer', serializers.JsonSerializer()),
                 'router': router,
-                'queues': backend_preferences.pop('queues'),
+                'queues': _backend_preferences.pop('queues'),
             }
-            backend = backend_preferences.pop('backend')
+            backend = _backend_preferences.pop('backend')
             if isinstance(backend, str):
                 if backend in core.BACKEND_LIST:
-                    backend = core.create_backend(backend, **backend_preferences)
+                    backend = core.create_backend(backend, **_backend_preferences)
                 else:
                     raise DistributedQueueError("Unknown backend name `%s`. Expected: %s"\
                         % (backend, ','.join(core.BACKEND_LIST)))
