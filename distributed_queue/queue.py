@@ -276,7 +276,7 @@ class Register(object):
         if task_uid not in self.registered_available_tasks:
             raise RegisterError("Task processor with task_uid '%s' is not in "
                 "available tasks. Register available tasks before registering "
-                "processors.")
+                "processors." % task_uid)
         self.registered_task_processors[task_uid] = func
         logger.info("Task processor for task '%s' is registered.", task_uid)
 
