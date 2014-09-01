@@ -220,15 +220,16 @@ class DistributedQueue(object):
                 if received_data is not None:
                     # pylint: disable=W0633
                     task_id, (task, args, kwargs) = received_data
-                    logger.debug("Received task '%s' with id = %s", task, task_id)
+                    logger.debug("Received task '%s' with id = %s.", task, task_id)
                     try:
                         register.process(task_id, task, args, kwargs)
                     except NotRegisteredError:
                         self.reject(task_id, backend_settings_group=backend_settings_group)
+                        logger.info("Task '%s' has been rejected.", task)
                     except Exception:
-                        logger.exception("Unexpected error")
+                        logger.exception("Unexpected error.")
                     else:
-                        logger.info("Task '%s' is finished", task)
+                        logger.info("Task '%s' is finished.", task)
                 else:
                     sleep(1)
             except KeyboardInterrupt:
